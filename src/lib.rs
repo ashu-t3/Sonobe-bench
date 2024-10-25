@@ -2,12 +2,18 @@
 #![allow(non_camel_case_types)]
 #![allow(clippy::upper_case_acronyms)]
 
+use ark_bn254::{
+    constraints::GVar, Bn254, Fr, G1Projective as G1Bn,
+};
+use ark_grumpkin::{
+    constraints::GVar as GVar2, Projective as G2Bn,
+};
 use ark_mnt4_298::{
-    Fr as Fr4, MNT4_298, G1Projective as G1, 
+    Fr as Fr4, MNT4_298, G1Projective as G1Mnt4, 
     g1::{Config as Config4}, Fq as Fq4
 };
 use ark_mnt6_298::{
-    Fr as Fr6, G1Projective as G2,
+    Fr as Fr6, G1Projective as G2Mnt6,
     g1::{Config as Config6}, Fq as Fq6
 };
 use ark_ff::PrimeField;
@@ -91,64 +97,55 @@ mod tests {
     use super::*;
     
     #[test]
-    fn test_mnt() {
+    fn bench_bn254() {
         let n_steps = 10;
-        // set the initial state
-        let z_0 = vec![Fr4::from(3_u32)];
+        let z_0 = vec![Fr::from(3_u32)];
         
-        let f_circuit = CubicFCircuit::<Fr4>::new(()).unwrap();
+        let f_circuit = CubicFCircuit::<Fr>::new(()).unwrap();
         
-        // Define Nova type using MNT4-298/MNT6-298 curve cycle
-        pub type N = Nova<
-            G1,
-            GVar4,
-            G2,
-            GVar6,
-            CubicFCircuit<Fr4>,
-            KZG<'static, MNT4_298>,
-            Pedersen<G2>,
-            false
+        pub type N_BN =
+            Nova<G1Bn, GVar, G2Bn, GVar2, CubicFCircuit<Fr>, KZG<'static, Bn254>, Pedersen<G2Bn>, false>;
+        pub type D_BN = DeciderEth<
+            G1Bn,
+            GVar,
+            G2Bn,
+            GVar2,
+            CubicFCircuit<Fr>,
+            KZG<'static, Bn254>,
+            Pedersen<G2Bn>,
+            Groth16<Bn254>,
+            N_BN,
         >;
         
-        // Define Decider type
-        pub type D = DeciderEth<
-            G1,
-            GVar4,
-            G2,
-            GVar6,
-            CubicFCircuit<Fr4>,
-            KZG<'static, MNT4_298>,
-            Pedersen<G2>,
-            Groth16<MNT4_298>,
-            N,
-        >;
+        println!("\nRunning BN254 benchmark:");
+        let total_start = Instant::now();
         
-        let poseidon_config = poseidon_canonical_config::<Fr4>();
+        let poseidon_config = poseidon_canonical_config::<Fr>();
         let mut rng = rand::rngs::OsRng;
         
-        // prepare the Nova prover & verifier params
         let nova_preprocess_params = PreprocessorParam::new(poseidon_config.clone(), f_circuit);
-        let nova_params = N::preprocess(&mut rng, &nova_preprocess_params).unwrap();
+        let nova_params = N_BN::preprocess(&mut rng, &nova_preprocess_params).unwrap();
         let pp_hash = nova_params.1.pp_hash().unwrap();
         
-        // initialize the folding scheme engine
-        let mut nova = N::init(&nova_params, f_circuit, z_0).unwrap();
+        let mut nova = N_BN::init(&nova_params, f_circuit, z_0).unwrap();
+        let (decider_pp, decider_vp) = D_BN::preprocess(&mut rng, nova_params, nova.clone()).unwrap();
         
-        // prepare the Decider prover & verifier params
-        let (decider_pp, decider_vp) = D::preprocess(&mut rng, nova_params, nova.clone()).unwrap();
-        
-        // run n steps of the folding iteration
+        let mut total_proving_time = 0;
         for i in 0..n_steps {
             let start = Instant::now();
             nova.prove_step(rng, vec![], None).unwrap();
-            println!("Nova::prove_step {}: {:?}", i, start.elapsed());
+            let duration = start.elapsed();
+            total_proving_time += duration.as_micros();
+            println!("BN254 Nova::prove_step {}: {:?}", i, duration);
         }
+        println!("BN254 Average proving time: {:?}µs", total_proving_time / n_steps as u128);
         
         let start = Instant::now();
-        let proof = D::prove(rng, decider_pp, nova.clone()).unwrap();
-        println!("generated Decider proof: {:?}", start.elapsed());
+        let proof = D_BN::prove(rng, decider_pp, nova.clone()).unwrap();
+        println!("BN254 Generated Decider proof: {:?}", start.elapsed());
         
-        let verified = D::verify(
+        let start = Instant::now();
+        let verified = D_BN::verify(
             decider_vp.clone(),
             nova.i,
             nova.z_0.clone(),
@@ -158,7 +155,81 @@ mod tests {
             &proof,
         )
         .unwrap();
+        println!("BN254 Verification time: {:?}", start.elapsed());
         assert!(verified);
-        println!("Decider proof verification: {}", verified);
+        println!("BN254 Total time: {:?}", total_start.elapsed());
+    }
+    
+    #[test]
+    fn bench_mnt() {
+        let n_steps = 10;
+        let z_0 = vec![Fr4::from(3_u32)];
+        
+        let f_circuit = CubicFCircuit::<Fr4>::new(()).unwrap();
+        
+        pub type N_MNT = Nova<
+            G1Mnt4,
+            GVar4,
+            G2Mnt6,
+            GVar6,
+            CubicFCircuit<Fr4>,
+            KZG<'static, MNT4_298>,
+            Pedersen<G2Mnt6>,
+            false
+        >;
+        
+        pub type D_MNT = DeciderEth<
+            G1Mnt4,
+            GVar4,
+            G2Mnt6,
+            GVar6,
+            CubicFCircuit<Fr4>,
+            KZG<'static, MNT4_298>,
+            Pedersen<G2Mnt6>,
+            Groth16<MNT4_298>,
+            N_MNT,
+        >;
+        
+        println!("\nRunning MNT cycle benchmark:");
+        let total_start = Instant::now();
+        
+        let poseidon_config = poseidon_canonical_config::<Fr4>();
+        let mut rng = rand::rngs::OsRng;
+        
+        let nova_preprocess_params = PreprocessorParam::new(poseidon_config.clone(), f_circuit);
+        let nova_params = N_MNT::preprocess(&mut rng, &nova_preprocess_params).unwrap();
+        let pp_hash = nova_params.1.pp_hash().unwrap();
+        
+        let mut nova = N_MNT::init(&nova_params, f_circuit, z_0).unwrap();
+        let (decider_pp, decider_vp) = D_MNT::preprocess(&mut rng, nova_params, nova.clone()).unwrap();
+        
+        let mut total_proving_time = 0;
+        for i in 0..n_steps {
+            let start = Instant::now();
+            nova.prove_step(rng, vec![], None).unwrap();
+            let duration = start.elapsed();
+            total_proving_time += duration.as_micros();
+            println!("MNT Nova::prove_step {}: {:?}", i, duration);
+        }
+        println!("MNT Average proving time: {:?}µs", total_proving_time / n_steps as u128);
+        
+        let start = Instant::now();
+        let proof = D_MNT::prove(rng, decider_pp, nova.clone()).unwrap();
+        println!("MNT Generated Decider proof: {:?}", start.elapsed());
+        
+        let start = Instant::now();
+        let verified = D_MNT::verify(
+            decider_vp.clone(),
+            nova.i,
+            nova.z_0.clone(),
+            nova.z_i.clone(),
+            &nova.U_i,
+            &nova.u_i,
+            &proof,
+        )
+        .unwrap();
+        println!("MNT Verification time: {:?}", start.elapsed());
+        assert!(verified);
+        println!("MNT Total time: {:?}", total_start.elapsed());
     }
 }
